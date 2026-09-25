@@ -135,13 +135,17 @@ jobs:
 
     steps:
       - name: Free disk space
-        # ~14GB 要塞下内核 worktree + rootfs + 2.8GB 镜像 + xz 产物
+        # ~14GB 要塞下内核 worktree + rootfs + 2.8GB 镜像 + xz 产物。
+        # 磁盘不够是最常见的失败原因，所以这里砍得狠一点，并且前后都打印 df 便于事后判断。
         run: |
-          df -h /
+          echo "=== before ==="; df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                     /usr/local/share/powershell /usr/share/swift /opt/hostedtoolcache/CodeQL
+                     /usr/local/share/powershell /usr/share/swift /opt/hostedtoolcache/CodeQL \
+                     /usr/lib/jvm /usr/share/az_* /opt/az /opt/google /usr/local/julia* \
+                     /usr/share/miniconda /var/lib/apt/lists/*
           sudo apt-get clean
-          df -h /
+          sudo docker system prune -a -f 2>/dev/null || true
+          echo "=== after ==="; df -h /
 
       - name: Checkout overlay (this repo)
         uses: actions/checkout@v4
@@ -174,17 +178,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rootfs-cache
-          path: /tmp
+          path: ${{ runner.temp }}/rf
 
       - name: Install rootfs into cache dir (re-stamped to current month)
         run: |
           set -e
-          mkdir -p armbian-build/cache/rootfs
-          NAME=$(cat /tmp/rootfs-filename.txt)
+          # 不要假设 artifact 解包后的确切路径：upload 时用的是绝对路径，
+          # 解包后文件可能落在 <path>/ 下也可能带一层 tmp/。一律 find 定位。
+          echo "--- artifact tree ---"
+          find "${{ runner.temp }}/rf" -type f | head -20
+          TARBALL=$(find "${{ runner.temp }}/rf" -name 'rootfs-cache.tar.zst' | head -1)
+          NAMEFILE=$(find "${{ runner.temp }}/rf" -name 'rootfs-filename.txt' | head -1)
+          [ -n "$TARBALL" ] || { echo "FATAL: rootfs-cache.tar.zst not found in artifact"; exit 1; }
+          [ -n "$NAMEFILE" ] || { echo "FATAL: rootfs-filename.txt not found in artifact"; exit 1; }
+          NAME=$(cat "$NAMEFILE")
           YM=$(date +%Y%m)
           NEW=$(echo "$NAME" | sed "s/_[0-9]\{6\}-/_${YM}-/")
           echo "rootfs: $NAME -> $NEW"
-          mv /tmp/rootfs-cache.tar.zst "armbian-build/cache/rootfs/$NEW"
+          mkdir -p armbian-build/cache/rootfs
+          mv "$TARBALL" "armbian-build/cache/rootfs/$NEW"
           ls -la armbian-build/cache/rootfs/
 
       - name: Restore ccache
@@ -198,6 +210,7 @@ jobs:
 
       - name: Build image
         run: |
+          echo "=== disk before build ==="; df -h /
           cd armbian-build
           sudo ./compile.sh build \
             BOARD=${{ env.BOARD }} \
