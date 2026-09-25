@@ -233,8 +233,8 @@ jobs:
           xz -T0 -6 -c "$IMG" > "/tmp/out/${IMG}.xz"
           cp -v "$IMG".sha "$IMG".txt /tmp/out/ 2>/dev/null || true
           cp -v ../../../cache/rootfs/*.tar.zst /tmp/out/ 2>/dev/null || true
-          # 打完镜像就不需要 2.8GB 的裸镜像了，腾出来给后续步骤
-          rm -f "$IMG"
+          # 镜像由 sudo compile.sh 生成，属主是 root；本步骤非 root，必须 sudo 才能删
+          sudo rm -f "$IMG" || true
           # debs 一并进 Release（不占 artifact 存储配额）
           cp -v ../debs/*.deb /tmp/out/ 2>/dev/null || true
           ls -la /tmp/out
