@@ -43,14 +43,25 @@ sudo ./compile.sh build BOARD=forlinx-ok3399 BRANCH=current RELEASE=noble \
 
 ## CI
 
-`build-ok3399.yml` 做的事：
+`build-ok3399.yml` 拆成**两个 job**，只为绕开 runner 的单 job 6 小时上限：
+
+```
+job1 rootfs  (timeout 90min)   compile.sh rootfs   debootstrap + 包安装   20~30 分钟
+     └─ artifact: rootfs-cache
+job2 image   (timeout 360min)  compile.sh build    u-boot + 内核 + 打包   3.5~4.5 小时
+```
+
+job1 产出的 rootfs 用 artifact 在同一次 run 内交给 job2，
+同时用 `actions/cache` 跨 run 复用（rootfs cache id 与板子无关，见下文）。
+
+各步细节：
 1. 腾磁盘（runner 只有 ~14GB，6.18 内核 worktree 会撑爆）
 2. checkout 本仓库 + 固定 SHA 的 armbian/build
-3. 把 overlay 拷进 armbian-build，并清一遍 CRLF
-4. 恢复 ccache / rootfs 缓存
-5. `compile.sh build`
+3. 把 overlay 拷进 armbian-build，清 CRLF，并把 `git.sh` 改成 shallow fetch
+4. rootfs 改名成当月（跨月复用关键）、ccache 恢复
+5. `compile.sh build ... KERNEL_BTF=no`
 6. `xz -T0 -6` 压缩镜像（Release 附件单文件上限 2GB，裸镜像接近 3GB）
-7. 发到 GitHub Release，同时把 deb 作为 artifact
+7. 镜像 + rootfs + debs 一起发到 GitHub Release（都走 Release，不占 artifact 存储配额）
 
 ⚠️ **GitHub-hosted runner 是 2 核 / 7GB RAM，单次 job 硬上限 6 小时**。
 6.18 内核冷编译在这个规格上要 3~5 小时，非常贴边。要稳定出图就用自托管 runner

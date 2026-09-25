@@ -15,42 +15,127 @@ on:
         default: 'noble'
         type: choice
         options: [noble, bookworm]
-      rootfs_url:
-        description: 'Prebuilt rootfs cache tarball URL (optional; see README "rootfs剥离"). Leave empty to build it in-job.'
-        required: false
-        default: ''
-        type: string
   push:
     branches: [main, master]
 
 # ---------------------------------------------------------------------------
-# GitHub-hosted ubuntu-24.04 runner: 2 核 / 7GB RAM / ~14GB SSD，job 上限 6 小时。
-# 这版 workflow 就是为了让完整构建塞进这个上限而写的，关键的四个省时点：
-#   1. KERNEL_BTF=no     —— BTF 要 6451 MiB 内存（runner 只有 ~6.8GB）且 pahole 在 2 核上极慢
-#   2. rootfs 剥离       —— 复用预置 rootfs，省掉 debootstrap + 包安装的 15~25 分钟
-#   3. git fetch --depth 1 —— Linux 完整历史好几个 GB，shallow 能省下 clone 时间和磁盘
-#   4. ccache            —— 第二次起内核编译大幅加速
-# 想更稳就换自托管 runner：把 runs-on 改成 [self-hosted, linux, x64]，其余不用动。
+# 拆成两个 job，只为绕开 GitHub-hosted runner 的 6 小时单 job 上限：
+#
+#   job1 rootfs : compile.sh rootfs   -> 只做 debootstrap+包安装，20~30 分钟
+#   job2 image  : compile.sh build    -> u-boot + 内核 + 打包，3.5~4.5 小时
+#
+# rootfs 通过 artifact 在同一次 run 内传给 job2，同时用 actions/cache 跨 run 复用。
+#
+# runner 规格：2 核 / 7GB RAM / ~14GB SSD。
+# 四个省时点（都查过框架源码）：
+#   1. KERNEL_BTF=no       —— armbian-kernel.sh:161 要求 6451 MiB 内存，runner 只有 ~6.8GB，
+#                             且 pahole 在 2 核上极慢。这是能不能跑完的关键开关。
+#   2. rootfs 剥离         —— artifact-rootfs.sh:46-51 明说缓存版本含 YYYYMM「按月强制刷新」，
+#                             所以复用时要把文件名里的月份改成当月才能命中。
+#   3. git fetch --depth 1 —— Linux 完整历史好几个 GB，shallow 省时间和磁盘。
+#   4. ccache              —— 第二次起内核编译大幅加速。
+#
+# 换成自托管 runner 只需把两处 runs-on 改成 [self-hosted, linux, x64]。
 # ---------------------------------------------------------------------------
 env:
-  # armbian/build 固定提交，避免上游改动把构建搞挂
+  # armbian/build 固定提交
   ARMBIAN_BUILD_SHA: 04108a20e5de1c956425b3f5a2a7cba47ba829b8
   BOARD: forlinx-ok3399
   BRANCH: current
   RELEASE: noble
-  # rootfs cache id：与板子无关，只取决于 release/arch/包列表。
-  # 这个值取自构建机上已生成的 rootfs 文件名，包配置不变就不会变。
-  ROOTFS_CACHE_ID: de3dd0bda694
-  ROOTFS_CACHE_SUFFIX: H6eccde-Bf1b6db
 
+# 两个 job 都要用到的准备步骤，写成复合 action 太重，直接复制三步即可
 jobs:
-  build:
+  # =========================================================================
+  rootfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout overlay (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Checkout armbian/build (pinned SHA)
+        uses: actions/checkout@v4
+        with:
+          repository: armbian/build
+          ref: ${{ env.ARMBIAN_BUILD_SHA }}
+          path: armbian-build
+          fetch-depth: 1
+
+      - name: Install overlay
+        run: |
+          set -e
+          cp -v overlay/config/boards/forlinx-ok3399.conf armbian-build/config/boards/
+          mkdir -p armbian-build/patch/kernel/rockchip64-current
+          cp -rv overlay/patch/kernel/rockchip64-current/. armbian-build/patch/kernel/rockchip64-current/
+          find armbian-build/patch/kernel/rockchip64-current -type f -exec sed -i 's/\r$//' {} \;
+          sed -i 's/\r$//' armbian-build/config/boards/forlinx-ok3399.conf
+
+      # 跨 run 复用。缓存里的文件带着生成时的月份，先改名成当月才能命中
+      # （armbian 的 rootfs 缓存是精确文件名匹配，且按月强制刷新）。
+      - name: Restore rootfs cache
+        id: rootfs_cache
+        uses: actions/cache@v4
+        with:
+          path: armbian-build/cache/rootfs
+          key: rootfs-${{ env.RELEASE }}-arm64-cli
+
+      - name: Re-stamp cached rootfs to current month
+        if: steps.rootfs_cache.outputs.cache-hit == 'true'
+        run: |
+          cd armbian-build/cache/rootfs
+          YM=$(date +%Y%m)
+          for f in rootfs-*.tar.zst; do
+            new=$(echo "$f" | sed "s/_[0-9]\{6\}-/_${YM}-/")
+            [ "$f" != "$new" ] && mv -v "$f" "$new"
+          done
+          ls -la
+
+      - name: Build rootfs cache
+        run: |
+          cd armbian-build
+          sudo ./compile.sh rootfs \
+            BOARD=${{ env.BOARD }} \
+            BRANCH=${{ env.BRANCH }} \
+            RELEASE=${{ env.RELEASE }} \
+            EXPERT=yes \
+            KERNEL_CONFIGURE=no \
+            BUILD_DESKTOP=no \
+            BUILD_MINIMAL=no
+
+      - name: Export rootfs for job2
+        run: |
+          set -e
+          cd armbian-build/cache/rootfs
+          ls -la
+          F=$(ls -t rootfs-*.tar.zst | head -1)
+          [ -n "$F" ] || { echo "no rootfs cache produced"; exit 1; }
+          basename "$F" > /tmp/rootfs-filename.txt
+          cp -v "$F" /tmp/rootfs-cache.tar.zst
+          ls -la /tmp/rootfs-cache.tar.zst
+          cat /tmp/rootfs-filename.txt
+
+      - name: Upload rootfs cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-cache
+          path: |
+            /tmp/rootfs-cache.tar.zst
+            /tmp/rootfs-filename.txt
+          retention-days: 2
+
+  # =========================================================================
+  image:
+    needs: rootfs
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
       - name: Free disk space
-        # runner 只剩 ~14GB；内核 worktree + rootfs + 2.8GB 镜像会撑爆
+        # ~14GB 要塞下内核 worktree + rootfs + 2.8GB 镜像 + xz 产物
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
@@ -77,35 +162,29 @@ jobs:
           cp -v overlay/config/boards/forlinx-ok3399.conf armbian-build/config/boards/
           mkdir -p armbian-build/patch/kernel/rockchip64-current
           cp -rv overlay/patch/kernel/rockchip64-current/. armbian-build/patch/kernel/rockchip64-current/
-          # Windows 换行会毁掉 dts 预处理和 shell heredoc，统一清一遍
           find armbian-build/patch/kernel/rockchip64-current -type f -exec sed -i 's/\r$//' {} \;
           sed -i 's/\r$//' armbian-build/config/boards/forlinx-ok3399.conf
-          # Linux 完整 git 历史好几个 GB，改成 shallow fetch 省时间和磁盘。
+          # Linux 完整 git 历史好几个 GB，改成 shallow fetch。
           # 注意用单引号：双引号会让 shell 把 ${verbose_params[@]} 展开成空串。
           sed -i 's|improved_git fetch "${verbose_params[@]}" --recurse-submodules=no|improved_git fetch "${verbose_params[@]}" --depth 1 --recurse-submodules=no|' \
             armbian-build/lib/functions/general/git.sh
           grep -n 'depth 1' armbian-build/lib/functions/general/git.sh || echo "WARN: git.sh tweak did not apply"
-          echo "--- overlay files ---"
-          find armbian-build/patch/kernel/rockchip64-current -type f
 
-      # ---------------------------------------------------------------------
-      # rootfs 剥离
-      # armbian 的 rootfs 缓存名是精确匹配的：
-      #   cache/rootfs/rootfs-${ARCH}-${RELEASE}-${cache_type}_${YYYYMM}-${rootfs_cache_id}-${suffix}.tar.zst
-      # 其中 YYYYMM 是「按月强制刷新」（artifact-rootfs.sh:46-51 有注释明说）。
-      # 所以把预置 tarball 改名成当月的名字就能命中，跨月也能继续复用。
-      # 命中失败不会报错，框架会自己重建 —— 只是慢，不会坏。
-      # ---------------------------------------------------------------------
-      - name: Fetch prebuilt rootfs cache
-        if: ${{ github.event.inputs.rootfs_url != '' }}
+      - name: Download rootfs cache from job1
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs-cache
+          path: /tmp
+
+      - name: Install rootfs into cache dir (re-stamped to current month)
         run: |
           set -e
           mkdir -p armbian-build/cache/rootfs
+          NAME=$(cat /tmp/rootfs-filename.txt)
           YM=$(date +%Y%m)
-          curl -fL --retry 3 -o /tmp/rootfs.tar.zst "${{ github.event.inputs.rootfs_url }}"
-          ls -la /tmp/rootfs.tar.zst
-          mv /tmp/rootfs.tar.zst \
-            "armbian-build/cache/rootfs/rootfs-arm64-${{ env.RELEASE }}-cli_${YM}-${{ env.ROOTFS_CACHE_ID }}-${{ env.ROOTFS_CACHE_SUFFIX }}.tar.zst"
+          NEW=$(echo "$NAME" | sed "s/_[0-9]\{6\}-/_${YM}-/")
+          echo "rootfs: $NAME -> $NEW"
+          mv /tmp/rootfs-cache.tar.zst "armbian-build/cache/rootfs/$NEW"
           ls -la armbian-build/cache/rootfs/
 
       - name: Restore ccache
@@ -116,13 +195,6 @@ jobs:
           restore-keys: |
             ccache-${{ env.BOARD }}-${{ env.BRANCH }}-${{ env.RELEASE }}-
             ccache-${{ env.BOARD }}-
-
-      - name: Restore in-job rootfs cache
-        if: ${{ github.event.inputs.rootfs_url == '' }}
-        uses: actions/cache@v4
-        with:
-          path: armbian-build/cache/rootfs
-          key: rootfs-${{ env.RELEASE }}-arm64-cli
 
       - name: Build image
         run: |
@@ -137,27 +209,22 @@ jobs:
             BUILD_MINIMAL=no \
             KERNEL_BTF=no
 
-      - name: Collect artifacts
+      - name: Compress and collect
         run: |
+          set -e
           cd armbian-build/output/images
           ls -la
           mkdir -p /tmp/out
           IMG=$(ls -t *Forlinx-ok3399*.img | head -1)
-          echo "IMG=$IMG"
           # Release 附件单文件上限 2GB，裸镜像接近 3GB，必须压缩
           xz -T0 -6 -c "$IMG" > "/tmp/out/${IMG}.xz"
-          cp -v "$IMG".sha /tmp/out/ 2>/dev/null || true
-          cp -v "$IMG".txt /tmp/out/ 2>/dev/null || true
-          # rootfs 顺手也传出去，下次可以直接填进 rootfs_url 复用
+          cp -v "$IMG".sha "$IMG".txt /tmp/out/ 2>/dev/null || true
           cp -v ../../../cache/rootfs/*.tar.zst /tmp/out/ 2>/dev/null || true
+          # 打完镜像就不需要 2.8GB 的裸镜像了，腾出来给后续步骤
+          rm -f "$IMG"
+          # debs 一并进 Release（不占 artifact 存储配额）
+          cp -v ../debs/*.deb /tmp/out/ 2>/dev/null || true
           ls -la /tmp/out
-
-      - name: Upload debs (kernel / dtb / u-boot)
-        uses: actions/upload-artifact@v4
-        with:
-          name: debs-${{ github.run_number }}
-          path: armbian-build/output/debs/*.deb
-          retention-days: 7
 
       - name: Publish to Release
         uses: softprops/action-gh-release@v2
@@ -165,13 +232,13 @@ jobs:
           tag_name: ok3399-${{ github.run_number }}
           name: "OK3399 Armbian ${{ env.RELEASE }} (kernel ${{ env.BRANCH }})"
           body: |
-            Forlinx OK3399 / RK3399 Armbian image.
+            Forlinx OK3399 / RK3399 Armbian image, built by GitHub Actions (2-job split).
             - armbian/build: `${{ env.ARMBIAN_BUILD_SHA }}`
             - U-Boot: v2025.01（only-blobs: rkbin DDR + miniloader + BL31）
             - KERNEL_BTF=no（BTF 需要 6451 MiB 内存，runner 上跑不动）
             - 烧录: SD 卡 dd；eMMC 用 rkdeveloptool
             - 串口: UART2 1500000 8N1
-            - rootfs cache id: `${{ env.ROOTFS_CACHE_ID }}`（同 release/arch/包列表可直接复用）
+            - `rootfs-*.tar.zst` 可直接跨构建复用（cache id 与板子无关）
           files: |
             /tmp/out/*
         env:
