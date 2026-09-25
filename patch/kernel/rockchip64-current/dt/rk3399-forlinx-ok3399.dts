@@ -1,0 +1,975 @@
+// SPDX-License-Identifier: GPL-2.0+
+/dts-v1/;
+/*
+ * Device Tree for Forlinx OK3399 core board (mainline style)
+ * Based on: ok3399.dts (BSP) → mainline template adaptation
+ * PMIC topology: RK808 + Syr827 (vdd_cpu_b) + Syr828 (vdd_gpu) — identical to NanoPC-T4
+ *
+ * REVISION NOTES (核验后修正):
+ *   1. 补 dt-bindings/mipi/dsi.h（原文件必编译失败）
+ *   2. 删除 uart0_gpios —— 它与 uart0_rts 争用 GPIO2_C3，会把 RTS 切成 GPIO
+ *   3. 补蓝牙三个 GPIO 的 pinctrl mux
+ *   4. 补 GMAC 复位脚 GPIO3_PB7 的 pinctrl（rgmii_pins 不含该脚）
+ *   5. 删除重复的 HDMI 声卡，只保留 &hdmi_sound
+ *   6. PCIe / USB host 供电挂上；删除死配置
+ *   7. fusb302 属性改为标准 sink-pdos / op-sink-microwatt
+ *
+ * 所有标 "TODO(原理图)" 的地方必须对照底板原理图确认后才能上板。
+ */
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pwm/pwm.h>
+#include <dt-bindings/usb/pd.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/gpio/gpio.h>
+/* NOTE: 主线 6.18 没有 dt-bindings/mipi/dsi.h（核验报告 FIX-1 给的路径是错的）。
+ * MIPI_DSI_MODE_* 只定义在 include/drm/drm_mipi_dsi.h（C 头，dts 用不了），
+ * 主线 rockchip dts 里也没有任何一块板用这些宏。DSI 面板段因此整体停用。 */
+#include "rk3399.dtsi"
+
+/ {
+	model = "Forlinx OK3399 Board";
+	compatible = "forlinx,ok3399", "rockchip,rk3399";
+
+	aliases {
+		ethernet0 = <&gmac>;
+		mmc0 = <&sdhci>;
+		mmc1 = <&sdmmc>;
+		mmc2 = <&sdio0>;
+	};
+
+	chosen {
+		stdout-path = "serial2:1500000n8";
+	};
+
+	/* ============ Fixed clocks ============ */
+	clkin_gmac: external-gmac-clock {
+		compatible = "fixed-clock";
+		clock-frequency = <125000000>;
+		clock-output-names = "clkin_gmac";
+		#clock-cells = <0>;
+	};
+
+	ap6256_lpo_clk: ap6256-lpo-clock {
+		compatible = "fixed-clock";
+		clock-frequency = <32768>;
+		clock-output-names = "ap6256_lpo_clk";
+		#clock-cells = <0>;
+	};
+
+	/* ============ System regulators ============ */
+	dc_12v: regulator-dc-12v {
+		compatible = "regulator-fixed";
+		regulator-name = "dc_12v";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <12000000>;
+		regulator-max-microvolt = <12000000>;
+	};
+
+	vcc5v0_sys: regulator-vcc5v0-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		vin-supply = <&dc_12v>;
+	};
+
+	vcc3v3_sys: regulator-vcc3v3-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc5v0_sys>;
+	};
+
+	vcc5v0_host: regulator-vcc5v0-host {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_host";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		/* FIX(厂商权威): VBUS 使能脚是 GPIO1_PA4，不是 GPIO4_PD1。
+		 * 之前写成 GPIO4_PD1，跟 sdio-pwrseq 的 wifi-enable-h 是同一个脚，
+		 * 导致 "pin gpio4-25 already requested ... cannot claim for sdio-pwrseq"
+		 * ——WiFi 直接被抢死。厂商 ok3399.dts:385 确认 gpio = <&gpio1 RK_PA4>。 */
+		enable-active-high;
+		gpio = <&gpio1 RK_PA4 GPIO_ACTIVE_HIGH>;
+		regulator-always-on;
+		vin-supply = <&vcc5v0_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&host_vbus_drv>;
+	};
+
+	vcc5v0_typec: regulator-vcc5v0-typec {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_typec";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&vcc5v0_sys>;
+	};
+
+	vcc_sd: regulator-vcc-sd {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_sd";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		/* FIX(厂商权威): SD 卡电源由 GPIO0_PA1 控制，厂商 ok3399.dts:404 */
+		enable-active-high;
+		gpio = <&gpio0 RK_PA1 GPIO_ACTIVE_HIGH>;
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&vcc3v3_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vcc_sd_h>;
+	};
+
+	vcc_phy: regulator-vcc-phy {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_phy";
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	vcc3v3_pcie: regulator-vcc3v3-pcie {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_pcie";
+		/* FIX(厂商权威): PCIe 3.3V 由 GPIO0_PB4 控制，厂商 ok3399.dts:356。
+		 * 之前没有 gpio —— PCIe 槽压根没上电，这就是
+		 * "PCIe link training gen1 timeout" 的真因。 */
+		enable-active-high;
+		gpio = <&gpio0 RK_PB4 GPIO_ACTIVE_HIGH>;
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&vcc3v3_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pcie_drv>;
+	};
+
+	lcd_enable: regulator-lcd-enable {
+		compatible = "regulator-fixed";
+		regulator-name = "lcd_enable";
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	vcc1v8_s3: regulator-vcc1v8-s3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc1v8_s3";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&vcc_1v8>;
+	};
+
+	/* ============ VDD_LOG PWM regulator ============ */
+	/* 注意：pwm2 的引脚由 rk3399.dtsi 默认为 GPIO1_C3 (pwm2_pin)。
+	 * TODO(原理图): 确认 OK3399 的 vdd_log PWM 接在 GPIO1_C3，否则在 &pwm2 里覆盖 pinctrl-0 */
+	vdd_log: vdd-log {
+		compatible = "pwm-regulator";
+		pwms = <&pwm2 0 25000 PWM_POLARITY_INVERTED>;
+		regulator-name = "vdd_log";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <800000>;
+		regulator-max-microvolt = <1400000>;
+		vin-supply = <&vcc5v0_sys>;
+	};
+
+	/* ============ SDIO (AP6256) power sequence ============ */
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		clocks = <&ap6256_lpo_clk>;
+		clock-names = "ext_clock";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_enable_h>;
+		reset-gpios = <&gpio4 RK_PD1 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <100>;
+	};
+
+	/* ============ GPIO LEDs ============ */
+	leds: gpio-leds {
+		compatible = "gpio-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&leds_gpio>;
+
+		/* FIX: 原名 led@1 有 unit-address 却没有 reg，触发 dtc 警告 */
+		led-1 {
+			gpios = <&gpio0 RK_PB1 GPIO_ACTIVE_HIGH>;
+			label = "system_work_led1";
+			linux,default-trigger = "heartbeat";
+		};
+	};
+
+	/* ============ Power key ============ */
+	gpio-keys {
+		compatible = "gpio-keys";
+		autorepeat;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pwr_key_pin>;
+
+		button-power {
+			debounce-interval = <10>;
+			gpios = <&gpio0 RK_PA5 GPIO_ACTIVE_LOW>;
+			label = "Power";
+			linux,code = <KEY_POWER>;
+			wakeup-source;
+		};
+	};
+
+	/* ============ DSI Backlight (PWM) ============ */
+	/* 注意：pwm1 默认引脚为 GPIO4_C6 (pwm1_pin)。
+	 * TODO(原理图): 确认背光 PWM 实际接脚，不对就在 &pwm1 里覆盖 pinctrl-0 */
+	dsi_backlight: dsi-backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm1 0 25000 0>;
+		brightness-levels = <0 255>;
+		num-interpolated-steps = <100>;
+		default-brightness-level = <80>;
+		status = "okay";
+	};
+
+	/* FIX: 删除了原文件的 sound-hdmi (simple-audio-card)。
+	 * rk3399.dtsi 自带的 &hdmi_sound 已经负责 HDMI 音频，两个同时存在会重复注册声卡。 */
+};
+
+/* ============ CPU / GPU power supplies ============ */
+&cpu_l0 { cpu-supply = <&vdd_cpu_l>; };
+&cpu_l1 { cpu-supply = <&vdd_cpu_l>; };
+&cpu_l2 { cpu-supply = <&vdd_cpu_l>; };
+&cpu_l3 { cpu-supply = <&vdd_cpu_l>; };
+&cpu_b0 { cpu-supply = <&vdd_cpu_b>; };
+&cpu_b1 { cpu-supply = <&vdd_cpu_b>; };
+
+&gpu {
+	mali-supply = <&vdd_gpu>;
+	status = "okay";
+};
+
+&emmc_phy { status = "okay"; };
+
+/* TODO: 若需要内存 devfreq，补 &dmc 节点（含 operating-points-v2、center-supply），
+ * 否则 &dfi 单独启用没有意义，display-subsystem 的 devfreq 引用也是空转。 */
+
+/* ============ Ethernet (RGMII) ============ */
+&gmac {
+	phy-supply = <&vcc_phy>;
+	phy-mode = "rgmii";
+	clock_in_out = "input";
+	snps,reset-gpio = <&gpio3 RK_PB7 GPIO_ACTIVE_LOW>;
+	snps,reset-active-low;
+	snps,reset-delays-us = <0 10000 50000>;
+	assigned-clocks = <&cru SCLK_RMII_SRC>;
+	assigned-clock-parents = <&clkin_gmac>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&rgmii_pins &phy_rst>;	/* FIX: rgmii_pins 不含 PB7，复位脚需单独 mux */
+	tx_delay = <0x28>;
+	rx_delay = <0x11>;
+	status = "okay";
+};
+
+/* ============ HDMI ============ */
+&hdmi {
+	ddc-i2c-bus = <&i2c3>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&hdmi_cec>;
+	status = "okay";
+};
+
+&hdmi_sound { status = "okay"; };
+
+&i2s2 {
+	#sound-dai-cells = <0>;
+	status = "okay";
+};
+
+/* ============ I2C0 — PMIC domain ============ */
+&i2c0 {
+	status = "okay";
+	i2c-scl-rising-time-ns = <168>;
+	i2c-scl-falling-time-ns = <4>;
+	clock-frequency = <400000>;
+
+	vdd_cpu_b: syr827@40 {
+		compatible = "silergy,syr827";
+		reg = <0x40>;
+		vin-supply = <&vcc5v0_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vsel1_gpio>;
+		vsel-gpios = <&gpio1 RK_PC1 GPIO_ACTIVE_HIGH>;
+		regulator-name = "vdd_cpu_b";
+		regulator-min-microvolt = <712500>;
+		regulator-max-microvolt = <1500000>;
+		regulator-ramp-delay = <1000>;
+		fcs,suspend-voltage-selector = <1>;
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-state-mem {
+			regulator-off-in-suspend;
+		};
+	};
+
+	vdd_gpu: syr828@41 {
+		compatible = "silergy,syr828";
+		reg = <0x41>;
+		vin-supply = <&vcc5v0_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vsel2_gpio>;
+		vsel-gpios = <&gpio1 RK_PB6 GPIO_ACTIVE_HIGH>;
+		regulator-name = "vdd_gpu";
+		regulator-min-microvolt = <735000>;
+		regulator-max-microvolt = <1400000>;
+		regulator-ramp-delay = <1000>;
+		fcs,suspend-voltage-selector = <1>;
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-state-mem {
+			regulator-off-in-suspend;
+		};
+	};
+
+	rk808: pmic@1b {
+		compatible = "rockchip,rk808";
+		reg = <0x1b>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <21 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pmic_int_l>;
+		system-power-controller;
+		wakeup-source;
+		#clock-cells = <1>;
+		clock-output-names = "xin32k", "rk808-clkout2";
+
+		/* TODO(原理图): 必须核对 RK808 各 VCC 引脚实际接的是 5V 还是 3.3V。
+		 * NanoPC-T4 等板的 DCDC 输入多为 vcc5v0_sys；此处沿用原文件的 vcc3v3_sys，
+		 * 接错会直接触发欠压保护。 */
+		vcc1-supply = <&vcc3v3_sys>;
+		vcc2-supply = <&vcc3v3_sys>;
+		vcc3-supply = <&vcc3v3_sys>;
+		vcc4-supply = <&vcc3v3_sys>;
+		vcc6-supply = <&vcc3v3_sys>;
+		vcc7-supply = <&vcc3v3_sys>;
+		vcc8-supply = <&vcc3v3_sys>;
+		vcc9-supply = <&vcc3v3_sys>;
+		vcc10-supply = <&vcc3v3_sys>;
+		vcc11-supply = <&vcc3v3_sys>;
+		vcc12-supply = <&vcc3v3_sys>;
+		vddio-supply = <&vcc_3v0>;
+
+		regulators {
+			vdd_center: DCDC_REG1 {
+				regulator-name = "vdd_center";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <750000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-ramp-delay = <6001>;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vdd_cpu_l: DCDC_REG2 {
+				regulator-name = "vdd_cpu_l";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <750000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-ramp-delay = <6001>;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc_ddr: DCDC_REG3 {
+				regulator-name = "vcc_ddr";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-state-mem {
+					regulator-on-in-suspend;
+				};
+			};
+
+			vcc_1v8: DCDC_REG4 {
+				regulator-name = "vcc_1v8";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <1800000>;
+				};
+			};
+
+			vcc1v8_dvp: LDO_REG1 {
+				regulator-name = "vcc1v8_dvp";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc3v0_tp: LDO_REG2 {
+				regulator-name = "vcc3v0_tp";
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc1v8_pmu: LDO_REG3 {
+				regulator-name = "vcc1v8_pmu";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <1800000>;
+				};
+			};
+
+			vccio_sd: LDO_REG4 {
+				regulator-name = "vccio_sd";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				/* FIX: 3000000 -> 3300000。io_domains 的 sdmmc-supply 要 3.3V，
+				 * 上限只到 3.0V 就会一直刷
+				 * "vccio_sd: unsupportable voltage range: 3300000-3000000uV"。
+				 * RK808 LDO 硬件范围是 1.8V-3.4V，nanopi4 官方 dts 也写 3300000。
+				 * （vcc_sd 是 LDO_REG4，不是 vccio_sd —— 名字别混） */
+				regulator-max-microvolt = <3300000>;
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <3000000>;
+				};
+			};
+
+			vcca3v0_codec: LDO_REG5 {
+				regulator-name = "vcca3v0_codec";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc_1v5: LDO_REG6 {
+				regulator-name = "vcc_1v5";
+				regulator-min-microvolt = <1500000>;
+				regulator-max-microvolt = <1500000>;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcca1v8_codec: LDO_REG7 {
+				regulator-name = "vcca1v8_codec";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc_3v0: LDO_REG8 {
+				regulator-name = "vcc_3v0";
+				/* FIX: 这是 RK808 自己的 vddio 电源，必须常开 */
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <3000000>;
+				};
+			};
+
+			vcc3v3_s3: SWITCH_REG1 {
+				regulator-name = "vcc3v3_s3";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc3v3_s0: SWITCH_REG2 {
+				regulator-name = "vcc3v3_s0";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+		};
+	};
+};
+
+/* ============ I2C1 — AHT20 humidity sensor ============ */
+&i2c1 {
+	status = "okay";
+	i2c-scl-rising-time-ns = <300>;
+	i2c-scl-falling-time-ns = <15>;
+
+	aht20: humidity-sensor@38 {
+		compatible = "aosong,aht20";
+		reg = <0x38>;
+	};
+};
+
+/* ============ I2C2 — free ============ */
+&i2c2 {
+	status = "okay";
+	i2c-scl-rising-time-ns = <300>;
+	i2c-scl-falling-time-ns = <15>;
+};
+
+/* ============ I2C3 — HDMI DDC ============ */
+&i2c3 {
+	status = "okay";
+	i2c-scl-rising-time-ns = <450>;
+	i2c-scl-falling-time-ns = <15>;
+};
+
+/* ============ I2C7 — FUSB302 Type-C PD ============ */
+&i2c7 {
+	status = "okay";
+	i2c-scl-rising-time-ns = <300>;
+	i2c-scl-falling-time-ns = <15>;
+
+	fusb0: fusb302@22 {
+		compatible = "fcs,fusb302";
+		reg = <0x22>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <RK_PA2 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fusb0_int>;
+		vbus-supply = <&vcc5v0_typec>;
+		status = "okay";
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			data-role = "dual";
+			power-role = "dual";
+			try-power-role = "sink";
+			/* FIX: 原 operating-mv / operating-uA 不是 usb-c-connector 的标准属性 */
+			sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+			op-sink-microwatt = <15000000>;
+			/* FIX: power-role="dual"(DRP) 时 tcpm 强制要求 source-pdos，
+			 * 缺了就 "cannot register tcpm port" (-EINVAL)。
+			 * 见 drivers/usb/typec/tcpm/tcpm.c tcpm_fw_get_caps():
+			 *   if (port->port_type != TYPEC_PORT_SNK) { count_u32("source-pdos"); if (ret==0) -EINVAL }
+			 * 若这个口只想做受电，把 power-role 改成 "sink" 并删掉本行。 */
+			source-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					usb_con_hs: endpoint {
+						remote-endpoint = <&u2phy0_otg_ep>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					usb_con_ss: endpoint {
+						remote-endpoint = <&tcphy0_typec_ep>;
+					};
+				};
+
+				/* 角色切换端点：与 &usbdrd_dwc3_0 的 usb-role-switch 配对。
+				 * 若你的内核 fusb302 走 extcon 路线，删除本 port 与 dwc3 的
+				 * usb-role-switch/port，改为 extcon = <&fusb0> 即可。 */
+				port@2 {
+					reg = <2>;
+					fusb0_role_switch: endpoint {
+						remote-endpoint = <&dwc3_0_role_switch>;
+					};
+				};
+			};
+		};
+	};
+};
+
+/* ============ SPI2 — spidev ============ */
+&spi2 {
+	status = "okay";
+
+	/* FIX: "spidev" compatible 已被主线弃用，保留 rohm,dh2228fv 即可被 spidev 驱动接管 */
+	spidev@0 {
+		compatible = "rohm,dh2228fv";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+	};
+};
+
+/* ============ UART0 — Bluetooth ============ */
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_xfer &uart0_cts &uart0_rts &bt_gpios>;
+	status = "okay";
+
+	bluetooth {
+		compatible = "brcm,bcm43455-bt";
+		clocks = <&ap6256_lpo_clk>;
+		clock-names = "lpo";
+		device-wakeup-gpios = <&gpio2 RK_PD2 GPIO_ACTIVE_HIGH>;
+		host-wakeup-gpios = <&gpio4 RK_PC5 GPIO_ACTIVE_HIGH>;
+		shutdown-gpios = <&gpio1 RK_PD0 GPIO_ACTIVE_HIGH>;
+		/* FIX: 原文件在此引用 uart0_gpios，该组把 GPIO2_C3(=UART0_RTS) 切成 GPIO，
+		 * 与 &uart0 的 uart0_rts 直接冲突，已删除。三个 BT 控制脚统一由 bt_gpios 配置。 */
+	};
+};
+
+/* ============ UART2 — Debug console ============ */
+&uart2 { status = "okay"; };
+
+/* ============ Multimedia ============
+ * 删掉了 &rkvdec / &iep / &iep_mmu / &pvtm —— 这四个是 Rockchip 4.4 BSP 专有节点，
+ * mainline 6.18 的 rk3399-base.dtsi 里根本没有（label 不存在 -> dtc FATAL）。
+ * mainline 对应能力：VPU 走 &vpu（hantro）、RGA 走 &rga、视频解码走 vdec 的
+ * rockchip-vdec 节点（主线命名不同，需要时另行添加）。 */
+&vpu { status = "okay"; };
+&rga { status = "okay"; };
+
+/* ============ Display: VOP + HDMI + DSI ============ */
+&vopb_mmu { status = "okay"; };
+&vopl_mmu { status = "okay"; };
+
+&vopb {
+	status = "okay";
+};
+
+&vopl {
+	status = "okay";
+};
+
+/* 内核版本注意：主线 6.6+ 的 rk3399-base.dtsi 中该节点标签为 &mipi_dsi，
+ * 旧内核（rk3399.dtsi 未拆分）为 &dsi。按你的内核版本二选一。 */
+/* DSI 停用（HDMI 优先）。启用前需满足两个前提：
+ *   1) 给 drivers/gpu/drm/panel/panel-simple.c 加 innolux,p070acb-ab1 条目
+ *      （1024x600 / MIPI 4-lane / RGB888，时序见下方 panel-timing）；
+ *   2) dsi,flags / dsi,format 需要 MIPI_DSI_* 宏，主线 6.18 无 dts 版头文件，
+ *      要么改用数值，要么等上游添加 dt-bindings/mipi/dsi.h。
+ * 在此之前保持 disabled，避免 panel@0 不 probe 拖住 DSI 主机。 */
+&mipi_dsi {
+	/* 同上：panel@0 的 reg=<0> 需要 1 个 address cell */
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "disabled";
+
+	panel@0 {
+		/* TODO(驱动): "innolux,p070acb-ab1" 不在主线 panel-simple.c 中，
+		 * "simple-panel-dsi" 也不是可用 fallback。二选一：
+		 *   a) 给 panel-simple.c 增加该面板条目（1024x600, MIPI 4-lane, RGB888）；
+		 *   b) 换成主线已有的、时序兼容的面板 compatible。
+		 * 未落地前，DSI 面板不会 probe。 */
+		compatible = "innolux,p070acb-ab1";
+		reg = <0>;
+		backlight = <&dsi_backlight>;
+		power-supply = <&lcd_enable>;
+
+		/* dsi,flags / dsi,format 需要 MIPI_DSI_* 宏，主线无 dts 版头文件，暂不写 */
+		dsi,lanes = <4>;
+
+		/* 主线 panel-simple 现推荐 panel-timing（原 display-timings 为老式绑定） */
+		panel-timing {
+			clock-frequency = <64000000>;
+			hactive = <1024>;
+			vactive = <600>;
+			hback-porch = <48>;
+			hfront-porch = <40>;
+			vback-porch = <16>;
+			vfront-porch = <40>;
+			hsync-len = <48>;
+			vsync-len = <3>;
+			hsync-active = <0>;
+			vsync-active = <0>;
+			de-active = <0>;
+			pixelclk-active = <0>;
+		};
+	};
+};
+
+/* ============ Storage ============ */
+&sdhci {
+	bus-width = <8>;
+	mmc-hs400-1_8v;
+	mmc-hs400-enhanced-strobe;
+	keep-power-in-suspend;
+	non-removable;
+	status = "okay";
+};
+
+&sdio0 {
+	/* 显式声明，否则 wifi@1 的 reg=<1> 会被按 #address-cells=2 解析 -> reg_format warning */
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clock-frequency = <50000000>;
+	clock-freq-min-max = <200000 50000000>;
+	supports-sdio;
+	bus-width = <4>;
+	disable-wp;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	keep-power-in-suspend;
+	mmc-pwrseq = <&sdio_pwrseq>;
+	non-removable;
+	num-slots = <1>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdio0_bus4 &sdio0_cmd &sdio0_clk>;
+	sd-uhs-sdr104;
+	status = "okay";
+
+	brcmf: wifi@1 {
+		compatible = "brcm,bcm43455-fmac";
+		reg = <1>;
+	};
+};
+
+&sdmmc {
+	clock-frequency = <150000000>;
+	clock-freq-min-max = <100000 150000000>;
+	supports-sd;
+	bus-width = <4>;
+	cap-mmc-highspeed;
+	cap-sd-highspeed;
+	disable-wp;
+	num-slots = <1>;
+	vmmc-supply = <&vcc_sd>;
+	vqmmc-supply = <&vccio_sd>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_cd &sdmmc_bus4>;
+	status = "okay";
+};
+
+/* ============ Thermal ============ */
+&tsadc {
+	rockchip,hw-tshut-mode = <1>;
+	rockchip,hw-tshut-polarity = <1>;
+	status = "okay";
+};
+
+/* ============ PWM ============ */
+/* FIX: pwm0 无消费者，且会占用 GPIO4_C2，默认不启用 */
+&pwm1 { status = "okay"; };
+&pwm2 { status = "okay"; };
+
+/* ============ SARADC ============ */
+&saradc {
+	vref-supply = <&vcc1v8_s3>;
+	status = "okay";
+};
+
+/* ============ Type-C / USB PHY ============ */
+&tcphy0 {
+	extcon = <&fusb0>;
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+			tcphy0_typec_ep: endpoint {
+				remote-endpoint = <&usb_con_ss>;
+			};
+		};
+	};
+};
+
+&u2phy0 {
+	status = "okay";
+	u2phy0_otg: otg-port {
+		status = "okay";
+		extcon = <&fusb0>;
+		u2phy0_otg_ep: endpoint {
+			remote-endpoint = <&usb_con_hs>;
+		};
+	};
+	u2phy0_host: host-port {
+		phy-supply = <&vcc5v0_host>;
+		status = "okay";
+	};
+};
+
+&usbdrd3_0 {
+	status = "okay";
+};
+
+&usbdrd_dwc3_0 {
+	status = "okay";
+	dr_mode = "otg";
+	usb-role-switch;
+	port {
+		dwc3_0_role_switch: endpoint {
+			remote-endpoint = <&fusb0_role_switch>;
+		};
+	};
+};
+
+/* ============ USB 2.0 Host 1 ============ */
+&tcphy1 { status = "okay"; };
+
+&u2phy1 {
+	status = "okay";
+	u2phy1_otg: otg-port { status = "okay"; };
+	u2phy1_host: host-port {
+		phy-supply = <&vcc5v0_host>;	/* FIX: 原为 vcc5v0_sys，vcc5v0_host 成了死节点 */
+		status = "okay";
+	};
+};
+
+&usbdrd3_1 { status = "okay"; };
+&usbdrd_dwc3_1 { status = "okay"; dr_mode = "host"; };
+
+&usb_host0_ehci { status = "okay"; };
+&usb_host0_ohci { status = "okay"; };
+&usb_host1_ehci { status = "okay"; };
+&usb_host1_ohci { status = "okay"; };
+
+/* ============ PCIe ============ */
+&pcie_phy { status = "okay"; };
+
+&pcie0 {
+	ep-gpios = <&gpio0 RK_PB0 GPIO_ACTIVE_HIGH>;
+	num-lanes = <4>;
+	max-link-speed = <1>;			/* FIX: RK3399 官方只保 Gen1，Gen2 需实测 */
+	vpcie3v3-supply = <&vcc3v3_pcie>;	/* FIX: 原 vcc3v3_pcie 定义了却没人引用 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie_reset>;
+	status = "okay";
+};
+
+/* ============ IO domains ============ */
+&io_domains {
+	status = "okay";
+	bt656-supply = <&vcc1v8_dvp>;
+	audio-supply = <&vcca1v8_codec>;
+	sdmmc-supply = <&vccio_sd>;
+	gpio1830-supply = <&vcc_1v8>;
+};
+
+&pmu_io_domains {
+	status = "okay";
+	pmu1830-supply = <&vcc_1v8>;
+};
+
+/* ============ DFI / DMC ============ */
+&dfi { status = "okay"; };
+
+/* ============ Pinctrl ============ */
+&pinctrl {
+	/* Keys */
+	keys {
+		pwr_key_pin: pwr-key-pin {
+			rockchip,pins = <0 RK_PA5 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	/* SDIO power sequence */
+	sdio-pwrseq {
+		wifi_enable_h: wifi-enable-h {
+			rockchip,pins = <4 RK_PD1 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	/* FIX: 新增蓝牙控制脚 mux（原文件完全没有，依赖上电默认值不可靠） */
+	bluetooth {
+		bt_gpios: bt-gpios {
+			rockchip,pins =
+				<1 RK_PD0 RK_FUNC_GPIO &pcfg_pull_none>,	/* BT_REG_ON  */
+				<2 RK_PD2 RK_FUNC_GPIO &pcfg_pull_none>,	/* BT_WAKE    */
+				<4 RK_PC5 RK_FUNC_GPIO &pcfg_pull_down>;	/* BT_HOST_WAKE */
+		};
+	};
+
+	/* GMAC PHY reset: rgmii_pins 不含 PB7，必须单独配 */
+	gmac {
+		phy_rst: phy-rst {
+			rockchip,pins = <3 RK_PB7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	/* USB host VBUS 使能 = GPIO1_PA4（厂商 ok3399.dts:1626）
+	 * 注意：GPIO4_PD1 是 WiFi 的 wifi-enable-h，两者不能混用 */
+	usb2 {
+		host_vbus_drv: host-vbus-drv {
+			rockchip,pins = <1 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	/* SD 卡电源使能 = GPIO0_PA1（厂商 ok3399.dts:1633） */
+	vcc_sd {
+		vcc_sd_h: vcc-sd-h {
+			rockchip,pins = <0 RK_PA1 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	/* PMIC domain */
+	pmic {
+		pmic_int_l: pmic-int-l {
+			rockchip,pins = <1 RK_PC5 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		vsel1_gpio: vsel1-gpio {
+			rockchip,pins = <1 RK_PC1 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+
+		vsel2_gpio: vsel2-gpio {
+			rockchip,pins = <1 RK_PB6 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+
+	/* FUSB302 */
+	fusb30x {
+		fusb0_int: fusb0-int {
+			rockchip,pins = <1 RK_PA2 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	/* PCIe：pcie_drv = 3V3 使能(GPIO0_PB4)，pcie_reset = PERST#(GPIO0_PB0)
+	 * 两者都是厂商 ok3399.dts:1648-1656 的权威值 */
+	pcie {
+		pcie_drv: pcie-drv {
+			rockchip,pins = <0 RK_PB4 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		pcie_reset: pcie-reset {
+			rockchip,pins = <0 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	/* LED */
+	leds {
+		leds_gpio: leds-gpio {
+			rockchip,pins = <0 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};

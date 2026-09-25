@@ -1,0 +1,15 @@
+config:
+
+  # Just some info stuff; not used by the patching scripts
+  name: rockchip64-current
+  kind: kernel
+  type: mainline
+  branch: linux-6.18.y
+
+  # .dts files in these directories will be copied as-is to the build tree
+  dts-directories:
+    - { source: "dt", target: "arch/arm64/boot/dts/rockchip" }
+
+  # Makefile in these dirs will be magically patched to include the dts files copied
+  auto-patch-dt-makefile:
+    - { incremental: true, directory: "arch/arm64/boot/dts/rockchip", config-var: "CONFIG_ARCH_ROCKCHIP" }
