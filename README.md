@@ -56,6 +56,36 @@ sudo ./compile.sh build BOARD=forlinx-ok3399 BRANCH=current RELEASE=noble \
 6.18 内核冷编译在这个规格上要 3~5 小时，非常贴边。要稳定出图就用自托管 runner
 （把 `runs-on` 改成 `[self-hosted, linux, x64]` 即可，其余不用动）。
 
+四个省时/省资源的关键开关，都是查过框架源码才定的，不是拍脑袋：
+
+| 开关 | 依据 | 作用 |
+|---|---|---|
+| `KERNEL_BTF=no` | `lib/functions/compilation/armbian-kernel.sh:150-171`：BTF 要求 **6451 MiB** 可用内存，不足直接 `exit_with_error` | runner 只有 ~6.8GB 可用，BTF 会 OOM；且 `pahole` 在 2 核上极慢 |
+| rootfs 剥离 | `artifact-rootfs.sh:46-51`：缓存版本含 `YYYYMM`，「按月强制刷新」 | 复用预置 rootfs，省 debootstrap + 包安装的 15~25 分钟 |
+| `git fetch --depth 1` | Linux 完整 git 历史好几个 GB | 省 clone 时间和磁盘（runner 只有 ~14GB） |
+| ccache | 内核第二次起大幅加速 | 反复调 dts 时收益巨大 |
+
+## rootfs 剥离
+
+armbian 的 rootfs 缓存**与板子无关**（只取决于 ARCH / RELEASE / cache_type / 包列表），
+所以可以做成独立资产，跨构建复用。
+
+缓存文件名是精确匹配的：
+
+```
+cache/rootfs/rootfs-${ARCH}-${RELEASE}-${cache_type}_${YYYYMM}-${rootfs_cache_id}-${suffix}.tar.zst
+例：rootfs-arm64-noble-cli_202609-de3dd0bda694-H6eccde-Bf1b6db.tar.zst
+```
+
+`YYYYMM` 是按月强制刷新的（框架注释原话："we use YYYYMM to make a new rootfs cache version
+per-month, even if nothing else changes"），所以跨月会失效——
+workflow 里的做法是把下载到的 tarball **改名成当月的名字**再放进 `cache/rootfs/`，这样跨月也能命中。
+
+命中失败不会报错，框架只是自己重建（慢一点，不会坏）。
+
+用法：每次构建跑完会把 rootfs tarball 一并传到 Release，下次构建时把那个 URL 填进
+`workflow_dispatch` 的 `rootfs_url` 即可。不填就 job 内自己生成，并用 `actions/cache` 缓存。
+
 ## 烧录
 
 - SD 卡：`dd if=Armbian-*.img of=/dev/sdX bs=4M status=progress conv=fsync`
