@@ -40,7 +40,7 @@
 	panel@0 {
 		compatible = "iorca,tl060fvxs07";
 		reg = <0>;
-		reset-gpios = <&gpio4 RK_PC5 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio4 RK_PD5 GPIO_ACTIVE_LOW>;
 		backlight = <&dsi_backlight>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&tl060_panel_reset>;
