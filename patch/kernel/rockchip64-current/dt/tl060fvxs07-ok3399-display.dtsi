@@ -1,0 +1,99 @@
+/*
+ * TL060FVXS07 on Forlinx OK3399 / RK3399
+ * First-stage display-only candidate.
+ *
+ * Hardware facts supplied for this board:
+ *   LCD_RST: GPIO4_D5 (AJ3), active-low reset, low >= 120 ms
+ *   BL_PWM:  GPIO4_C2 = RK3399 PWM0
+ *   TP I2C1: GPIO4_A1 / GPIO4_A2
+ *   TP IRQ:  GPIO1_C6
+ *   LCD power/backlight: direct-fed; PWM is presumed to control brightness
+ */
+
+/ {
+	dsi_backlight: dsi-backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm0 0 25000 0>;
+		brightness-levels = <0 4 8 16 32 64 96 128 160 192 224 255>;
+		default-brightness-level = <8>;
+		status = "okay";
+	};
+};
+
+&pwm0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm0_pin>;
+};
+
+&pinctrl {
+	tl060fvxs07 {
+		tl060_panel_reset: panel-reset {
+			rockchip,pins = <4 RK_PC5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
+&mipi_dsi {
+	status = "okay";
+
+	panel@0 {
+		compatible = "iorca,tl060fvxs07";
+		reg = <0>;
+		reset-gpios = <&gpio4 RK_PC5 GPIO_ACTIVE_LOW>;
+		backlight = <&dsi_backlight>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&tl060_panel_reset>;
+
+		/* provisional timing; sourced from successful TL060FVXS07 cases */
+		panel-timing {
+			clock-frequency = <135000000>;
+			hactive = <1080>;
+			hfront-porch = <115>;
+			hback-porch = <15>;
+			hsync-len = <5>;
+			vactive = <2160>;
+			vfront-porch = <10>;
+			vback-porch = <10>;
+			vsync-len = <5>;
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				tl060_panel_in: endpoint {
+					remote-endpoint = <&tl060_dsi_out>;
+				};
+			};
+		};
+	};
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* mipi_out is the RK3399 mainline DSI output port */
+		port@1 {
+			reg = <1>;
+			tl060_dsi_out: endpoint {
+				remote-endpoint = <&tl060_panel_in>;
+			};
+		};
+	};
+};
+
+/* RK3399 DSI input: use VOPL for the first display path. */
+&vopl {
+	status = "okay";
+};
+
+&vopl_out_mipi {
+	remote-endpoint = <&mipi_in_vopl>;
+};
+
+&mipi_in_vopl {
+	remote-endpoint = <&vopl_out_mipi>;
+};
