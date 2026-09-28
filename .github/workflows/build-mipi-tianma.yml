@@ -66,13 +66,18 @@ jobs:
             armbian-build/patch/kernel/rockchip64-current \
             -type f -exec sed -i 's/\r$//' {} +
 
+          # Armbian patching.py only applies numbered *.patch files from the
+          # active patch directory. Keep the panel patch in that directory.
+          cp -v overlay/patch/kernel/rockchip64-current/patches/*.patch \
+            armbian-build/patch/kernel/rockchip64-current/
+
       - name: Verify MIPI payload
         run: |
           set -eux
-          test -f armbian-build/patch/kernel/rockchip64-current/patches/0001-panel-iorca-tl060fvxs07.patch
+          test -f armbian-build/patch/kernel/rockchip64-current/0001-panel-iorca-tl060fvxs07.patch
           test -f armbian-build/patch/kernel/rockchip64-current/dt/tl060fvxs07-ok3399-display.dtsi
           grep -q 'drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c' \
-            armbian-build/patch/kernel/rockchip64-current/patches/0001-panel-iorca-tl060fvxs07.patch
+            armbian-build/patch/kernel/rockchip64-current/0001-panel-iorca-tl060fvxs07.patch
           grep -q 'GPIO4_D5' \
             armbian-build/patch/kernel/rockchip64-current/dt/tl060fvxs07-ok3399-display.dtsi
 
