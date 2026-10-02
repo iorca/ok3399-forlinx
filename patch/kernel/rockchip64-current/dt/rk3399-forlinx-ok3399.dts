@@ -228,11 +228,11 @@
 	};
 
 	/* ============ DSI Backlight (PWM) ============ */
-	/* 注意：pwm1 默认引脚为 GPIO4_C6 (pwm1_pin)。
-	 * TODO(原理图): 确认背光 PWM 实际接脚，不对就在 &pwm1 里覆盖 pinctrl-0 */
+	/* MIPI-HUB TL060FVXS07：背光 PWM = GPIO4_C2 = PWM0 (pwm0_pin, func1)。
+	 * 背光为直供，PWM 只调亮度，没有 enable GPIO / power-supply。 */
 	dsi_backlight: dsi-backlight {
 		compatible = "pwm-backlight";
-		pwms = <&pwm1 0 25000 0>;
+		pwms = <&pwm0 0 25000 0>;
 		brightness-levels = <0 255>;
 		num-interpolated-steps = <100>;
 		default-brightness-level = <80>;
@@ -669,50 +669,36 @@
 	status = "okay";
 };
 
-/* 内核版本注意：主线 6.6+ 的 rk3399-base.dtsi 中该节点标签为 &mipi_dsi，
- * 旧内核（rk3399.dtsi 未拆分）为 &dsi。按你的内核版本二选一。 */
-/* DSI 停用（HDMI 优先）。启用前需满足两个前提：
- *   1) 给 drivers/gpu/drm/panel/panel-simple.c 加 innolux,p070acb-ab1 条目
- *      （1024x600 / MIPI 4-lane / RGB888，时序见下方 panel-timing）；
- *   2) dsi,flags / dsi,format 需要 MIPI_DSI_* 宏，主线 6.18 无 dts 版头文件，
- *      要么改用数值，要么等上游添加 dt-bindings/mipi/dsi.h。
- * 在此之前保持 disabled，避免 panel@0 不 probe 拖住 DSI 主机。 */
+/* MIPI-HUB 天马 TL060FVXS07 (S6D6FT0, 1080x2160, 4-lane video burst)
+ * 驱动：drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c（本仓库 0001 patch）
+ *       lanes/format/mode_flags/时序全部在驱动里，DT 不写 panel-timing。
+ * 通路：VOPB 和 VOPL 在 rk3399-base.dtsi 中都已连到 mipi_in，保持默认。
+ * LCD_RST = GPIO4_D5 (AJ3)，低有效，复位低电平 120ms（驱动 prepare 里实现）。
+ * 屏供电直供，不挂 power-supply。 */
 &mipi_dsi {
-	/* 同上：panel@0 的 reg=<0> 需要 1 个 address cell */
 	#address-cells = <1>;
 	#size-cells = <0>;
-	status = "disabled";
+	status = "okay";
 
 	panel@0 {
-		/* TODO(驱动): "innolux,p070acb-ab1" 不在主线 panel-simple.c 中，
-		 * "simple-panel-dsi" 也不是可用 fallback。二选一：
-		 *   a) 给 panel-simple.c 增加该面板条目（1024x600, MIPI 4-lane, RGB888）；
-		 *   b) 换成主线已有的、时序兼容的面板 compatible。
-		 * 未落地前，DSI 面板不会 probe。 */
-		compatible = "innolux,p070acb-ab1";
+		compatible = "iorca,tl060fvxs07";
 		reg = <0>;
 		backlight = <&dsi_backlight>;
-		power-supply = <&lcd_enable>;
+		reset-gpios = <&gpio4 RK_PD5 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lcd_rst_gpio>;
 
-		/* dsi,flags / dsi,format 需要 MIPI_DSI_* 宏，主线无 dts 版头文件，暂不写 */
-		dsi,lanes = <4>;
-
-		/* 主线 panel-simple 现推荐 panel-timing（原 display-timings 为老式绑定） */
-		panel-timing {
-			clock-frequency = <64000000>;
-			hactive = <1024>;
-			vactive = <600>;
-			hback-porch = <48>;
-			hfront-porch = <40>;
-			vback-porch = <16>;
-			vfront-porch = <40>;
-			hsync-len = <48>;
-			vsync-len = <3>;
-			hsync-active = <0>;
-			vsync-active = <0>;
-			de-active = <0>;
-			pixelclk-active = <0>;
+		port {
+			panel_in_dsi: endpoint {
+				remote-endpoint = <&mipi_out_panel>;
+			};
 		};
+	};
+};
+
+&mipi_out {
+	mipi_out_panel: endpoint {
+		remote-endpoint = <&panel_in_dsi>;
 	};
 };
 
@@ -776,7 +762,9 @@
 };
 
 /* ============ PWM ============ */
-/* FIX: pwm0 无消费者，且会占用 GPIO4_C2，默认不启用 */
+/* pwm0 = GPIO4_C2 = TL060FVXS07 背光 */
+&pwm0 { status = "okay"; };
+/* pwm1 (GPIO4_C6) 已无消费者；保持原状不动，避免影响原板配置 */
 &pwm1 { status = "okay"; };
 &pwm2 { status = "okay"; };
 
@@ -886,6 +874,13 @@
 
 /* ============ Pinctrl ============ */
 &pinctrl {
+	/* MIPI 屏复位：GPIO4_D5 (AJ3) */
+	lcd {
+		lcd_rst_gpio: lcd-rst-gpio {
+			rockchip,pins = <4 RK_PD5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
 	/* Keys */
 	keys {
 		pwr_key_pin: pwr-key-pin {

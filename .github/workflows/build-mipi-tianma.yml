@@ -60,26 +60,29 @@ jobs:
           set -eux
           cp overlay/config/boards/forlinx-ok3399.conf armbian-build/config/boards/
           mkdir -p armbian-build/patch/kernel/rockchip64-current
+          # patch dir contains 0000.patching_config.yaml + *.patch at its root
+          # (patching.py only picks up numbered patch files from the root, and
+          # reads dts-directories from the yaml).
           cp -rv overlay/patch/kernel/rockchip64-current/. \
             armbian-build/patch/kernel/rockchip64-current/
           find armbian-build/config/boards \
             armbian-build/patch/kernel/rockchip64-current \
             -type f -exec sed -i 's/\r$//' {} +
-
-          # Armbian patching.py only applies numbered *.patch files from the
-          # active patch directory. Keep the panel patch in that directory.
-          cp -v overlay/patch/kernel/rockchip64-current/patches/*.patch \
-            armbian-build/patch/kernel/rockchip64-current/
+          ls -l armbian-build/patch/kernel/rockchip64-current/ \
+            armbian-build/patch/kernel/rockchip64-current/dt/
 
       - name: Verify MIPI payload
         run: |
           set -eux
-          test -f armbian-build/patch/kernel/rockchip64-current/0001-panel-iorca-tl060fvxs07.patch
-          test -f armbian-build/patch/kernel/rockchip64-current/dt/tl060fvxs07-ok3399-display.dtsi
-          grep -q 'drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c' \
-            armbian-build/patch/kernel/rockchip64-current/0001-panel-iorca-tl060fvxs07.patch
-          grep -q 'GPIO4_D5' \
-            armbian-build/patch/kernel/rockchip64-current/dt/tl060fvxs07-ok3399-display.dtsi
+          P=armbian-build/patch/kernel/rockchip64-current
+          test -f "$P/0001-drm-panel-add-iorca-tl060fvxs07.patch"
+          test -f "$P/dt/rk3399-forlinx-ok3399.dts"
+          test -f "$P/0000.patching_config.yaml"
+          grep -q 'drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c' "$P/0001-drm-panel-add-iorca-tl060fvxs07.patch"
+          grep -q 'RK_PD5' "$P/dt/rk3399-forlinx-ok3399.dts"
+          grep -q '&pwm0 0 25000' "$P/dt/rk3399-forlinx-ok3399.dts"
+          grep -q 'iorca,tl060fvxs07' "$P/dt/rk3399-forlinx-ok3399.dts"
+          grep -q 'custom_kernel_config' armbian-build/config/boards/forlinx-ok3399.conf
 
       - name: Configure shallow Linux fetch
         run: |
@@ -108,6 +111,30 @@ jobs:
           cd armbian-build/output/images
           ls -lh
           test -n "$(find . -maxdepth 1 -type f -iname '*Forlinx-ok3399*.img' -print -quit)"
+
+      # 上一版镜像编译“成功”但 DTB 里根本没有屏：驱动没进 Kconfig/Makefile，
+      # dtsi 也没被 include。这里读回产物做真校验，别再只看构建日志。
+      - name: Verify image really carries the panel
+        run: |
+          set -eux
+          cd armbian-build/output/images
+          sudo apt-get update -qq > /dev/null
+          sudo apt-get install -y -qq device-tree-compiler
+          IMG=$(find . -maxdepth 1 -type f -iname '*Forlinx-ok3399*.img' -printf '%f\n' | sort | tail -1)
+          rm -rf /tmp/i /tmp/i/part0
+          mkdir -p /tmp/i
+          bsdtar -xf "$IMG" -C /tmp/i 2>/dev/null || \
+            sudo debugfs -R "dump <parts> /tmp/i" "$IMG" 2>/dev/null || true
+          ls -R /tmp/i | head -20
+          DTB=$(find /tmp/i -name 'rk3399-forlinx-ok3399.dtb' -print -quit)
+          test -n "${DTB}" || { echo "::error::no rk3399-forlinx-ok3399.dtb inside image"; exit 1; }
+          echo "DTB=$DTB"
+          fdtget "${DTB}" / panel@0 compatible   # 期望 iorca,tl060fvxs07
+          fdtget "${DTB}" / panel@0 reset-gpios  # 期望 bank 4 pin 0x1d
+          fdtget "${DTB}" / dsi-backlight pwms   # 期望 0xff420000 (PWM0)
+          KO=$(find /tmp/i -name 'panel-iorca-tl060fvxs07.ko' -print -quit)
+          test -n "${KO}" || { echo "::error::panel module missing in image"; exit 1; }
+          echo "KO=$KO"
 
       - name: Compress image
         run: |

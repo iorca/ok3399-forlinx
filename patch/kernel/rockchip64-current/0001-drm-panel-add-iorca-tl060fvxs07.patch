@@ -1,0 +1,300 @@
+From e24d3b9a5900921606b156681cfda1b847930d17 Mon Sep 17 00:00:00 2001
+From: iorca <iorca@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 23:50:29 +0800
+Subject: [PATCH] drm/panel: add Tianma TL060FVXS07 (S6D6FT0) DSI panel driver
+
+Init/off sequences decoded from vendor Qualcomm MDSS description.
+Used by Forlinx OK3399 + MIPI-HUB TL060FVXS07.
+---
+ drivers/gpu/drm/panel/Kconfig                 |  11 +
+ drivers/gpu/drm/panel/Makefile                |   1 +
+ .../gpu/drm/panel/panel-iorca-tl060fvxs07.c   | 245 ++++++++++++++++++
+ 3 files changed, 257 insertions(+)
+ create mode 100644 drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c
+
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index 967265e..51ba096 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -1162,6 +1162,17 @@ config DRM_PANEL_WIDECHIPS_WS2401
+ 	  480x800 display controller used in panels such as Samsung LMS380KF01.
+ 	  This display is used in the Samsung Galaxy Ace 2 GT-I8160 (Codina).
+ 
++config DRM_PANEL_IORCA_TL060FVXS07
++	tristate "Tianma TL060FVXS07 (S6D6FT0) 1080x2160 DSI panel"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	depends on GPIOLIB
++	help
++	  Say Y or M here to enable support for the Tianma TL060FVXS07
++	  6.0" 1080x2160 4-lane MIPI-DSI video mode panel with a
++	  Samsung S6D6FT0 display controller.
++
+ config DRM_PANEL_XINPENG_XPP055C272
+ 	tristate "Xinpeng XPP055C272 panel driver"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index 3615a76..8403a64 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -115,4 +115,5 @@ obj-$(CONFIG_DRM_PANEL_VISIONOX_RM692E5) += panel-visionox-rm692e5.o
+ obj-$(CONFIG_DRM_PANEL_VISIONOX_VTDR6130) += panel-visionox-vtdr6130.o
+ obj-$(CONFIG_DRM_PANEL_VISIONOX_R66451) += panel-visionox-r66451.o
+ obj-$(CONFIG_DRM_PANEL_WIDECHIPS_WS2401) += panel-widechips-ws2401.o
++obj-$(CONFIG_DRM_PANEL_IORCA_TL060FVXS07) += panel-iorca-tl060fvxs07.o
+ obj-$(CONFIG_DRM_PANEL_XINPENG_XPP055C272) += panel-xinpeng-xpp055c272.o
+diff --git a/drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c b/drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c
+new file mode 100644
+index 0000000..61837b9
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.c
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Tianma TL060FVXS07 6.0" 1080x2160 MIPI-DSI panel (Samsung S6D6FT0 DDIC)
++ *
++ * Init/off sequences are decoded verbatim from the vendor Qualcomm MDSS
++ * panel description (dsi-panel-tianma-s6d6ft0-1080p-video.dtsi,
++ * qcom,mdss-dsi-on-command / -off-command). Structure follows
++ * panel-xinpeng-xpp055c272.c, which is known to work on RK3399 DW-DSI.
++ */
++
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++
++#include <video/mipi_display.h>
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++
++struct tl060 {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct gpio_desc *reset_gpio;
++};
++
++static inline struct tl060 *panel_to_tl060(struct drm_panel *panel)
++{
++	return container_of(panel, struct tl060, panel);
++}
++
++/* S6D6FT0 level-2 / level-3 command access keys */
++#define S6D6FT0_KEY_L2	0x9f
++#define S6D6FT0_KEY_L3	0xf0
++
++static void tl060_on_sequence(struct mipi_dsi_multi_context *dsi_ctx)
++{
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L2, 0xa5, 0xa5);
++
++	mipi_dsi_dcs_exit_sleep_mode_multi(dsi_ctx);
++	mipi_dsi_msleep(dsi_ctx, 120);
++
++	/* 0x55 WRITE_CABC / power save: 0x10 (vendor value) */
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, MIPI_DCS_WRITE_POWER_SAVE, 0x10);
++
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L3, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x73, 0x94);
++
++	/* gamma, identical 20-byte block repeated for R/G/B */
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xea,
++		0x00, 0x73, 0x11, 0x1b, 0x23, 0x2a, 0x40, 0x59, 0x70, 0x6e,
++		0xa1, 0x86, 0x92, 0x9f, 0xab, 0xb8, 0x4d, 0x59, 0x65, 0x7f,
++		0x00, 0x73, 0x11, 0x1b, 0x23, 0x2a, 0x40, 0x59, 0x70, 0x6e,
++		0xa1, 0x86, 0x92, 0x9f, 0xab, 0xb8, 0x4d, 0x59, 0x65, 0x7f,
++		0x00, 0x73, 0x11, 0x1b, 0x23, 0x2a, 0x40, 0x59, 0x70, 0x6e,
++		0xa1, 0x86, 0x92, 0x9f, 0xab, 0xb8, 0x4d, 0x59, 0x65, 0x7f);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xeb,
++		0x00, 0x73, 0x11, 0x1b, 0x23, 0x2a, 0x40, 0x59, 0x70, 0x6e,
++		0xa1, 0x86, 0x92, 0x9f, 0xab, 0xb8, 0x4d, 0x59, 0x65, 0x7f,
++		0x00, 0x73, 0x11, 0x1b, 0x23, 0x2a, 0x40, 0x59, 0x70, 0x6e,
++		0xa1, 0x86, 0x92, 0x9f, 0xab, 0xb8, 0x4d, 0x59, 0x65, 0x7f,
++		0x00, 0x73, 0x11, 0x1b, 0x23, 0x2a, 0x40, 0x59, 0x70, 0x6e,
++		0xa1, 0x86, 0x92, 0x9f, 0xab, 0xb8, 0x4d, 0x59, 0x65, 0x7f);
++
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L3, 0xa5, 0xa5);
++
++	mipi_dsi_dcs_set_display_on_multi(dsi_ctx);
++
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L2, 0x5a, 0x5a);
++}
++
++static void tl060_off_sequence(struct mipi_dsi_multi_context *dsi_ctx)
++{
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L2, 0xa5, 0xa5);
++
++	mipi_dsi_dcs_set_display_off_multi(dsi_ctx);
++	mipi_dsi_dcs_enter_sleep_mode_multi(dsi_ctx);
++	mipi_dsi_msleep(dsi_ctx, 80);
++
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L3, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x73, 0x90);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L3, 0xa5, 0xa5);
++
++	/* vendor sends DCS short write 0x24 here; kept verbatim */
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x24, 0x00);
++
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, S6D6FT0_KEY_L2, 0x5a, 0x5a);
++}
++
++static int tl060_prepare(struct drm_panel *panel)
++{
++	struct tl060 *ctx = panel_to_tl060(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	/* reset-gpios is ACTIVE_LOW: 1 = line low (asserted) */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	msleep(120);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	msleep(120);
++
++	tl060_on_sequence(&dsi_ctx);
++	if (dsi_ctx.accum_err) {
++		dev_err(panel->dev, "init sequence failed: %d\n",
++			dsi_ctx.accum_err);
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++		return dsi_ctx.accum_err;
++	}
++
++	msleep(20);
++	return 0;
++}
++
++static int tl060_unprepare(struct drm_panel *panel)
++{
++	struct tl060 *ctx = panel_to_tl060(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	tl060_off_sequence(&dsi_ctx);
++	if (dsi_ctx.accum_err)
++		dev_warn(panel->dev, "off sequence failed: %d\n",
++			 dsi_ctx.accum_err);
++
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	return 0;
++}
++
++/*
++ * 135 MHz, HFP/HSA/HBP 115/5/15, VFP/VSA/VBP 10/5/10 (~50.9 Hz).
++ * Taken from the working kickpi-k1 TL060FVXS07 case; lane rate on
++ * RK3399 DW-DSI ~1.0 Gbps/lane, well under the 1.5 Gbps D-PHY limit.
++ */
++static const struct drm_display_mode tl060_mode = {
++	.clock		= 135000,
++	.hdisplay	= 1080,
++	.hsync_start	= 1080 + 115,
++	.hsync_end	= 1080 + 115 + 5,
++	.htotal		= 1080 + 115 + 5 + 15,
++	.vdisplay	= 2160,
++	.vsync_start	= 2160 + 10,
++	.vsync_end	= 2160 + 10 + 5,
++	.vtotal		= 2160 + 10 + 5 + 10,
++	.width_mm	= 68,
++	.height_mm	= 136,
++	.flags		= DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
++};
++
++static int tl060_get_modes(struct drm_panel *panel,
++			   struct drm_connector *connector)
++{
++	struct drm_display_mode *mode;
++
++	mode = drm_mode_duplicate(connector->dev, &tl060_mode);
++	if (!mode)
++		return -ENOMEM;
++
++	drm_mode_set_name(mode);
++	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	connector->display_info.width_mm = mode->width_mm;
++	connector->display_info.height_mm = mode->height_mm;
++	drm_mode_probed_add(connector, mode);
++
++	return 1;
++}
++
++static const struct drm_panel_funcs tl060_funcs = {
++	.prepare	= tl060_prepare,
++	.unprepare	= tl060_unprepare,
++	.get_modes	= tl060_get_modes,
++};
++
++static int tl060_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct tl060 *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct tl060, panel, &tl060_funcs,
++				   DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	/* hold the panel in reset until prepare() */
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
++				     "cannot get reset gpio\n");
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	/* vendor: burst_mode, force-clock-lane-hs, tx-eot-append */
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
++			  MIPI_DSI_MODE_LPM;
++
++	ret = drm_panel_of_backlight(&ctx->panel);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get backlight\n");
++
++	drm_panel_add(&ctx->panel);
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		dev_err_probe(dev, ret, "mipi_dsi_attach failed\n");
++		drm_panel_remove(&ctx->panel);
++		return ret;
++	}
++
++	return 0;
++}
++
++static void tl060_remove(struct mipi_dsi_device *dsi)
++{
++	struct tl060 *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret < 0)
++		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
++
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct of_device_id tl060_of_match[] = {
++	{ .compatible = "iorca,tl060fvxs07" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, tl060_of_match);
++
++static struct mipi_dsi_driver tl060_driver = {
++	.driver = {
++		.name = "panel-iorca-tl060fvxs07",
++		.of_match_table = tl060_of_match,
++	},
++	.probe	= tl060_probe,
++	.remove	= tl060_remove,
++};
++module_mipi_dsi_driver(tl060_driver);
++
++MODULE_DESCRIPTION("Tianma TL060FVXS07 (S6D6FT0) MIPI-DSI panel driver");
++MODULE_LICENSE("GPL");
+-- 
+2.55.0.windows.3
+
