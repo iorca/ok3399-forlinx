@@ -73,6 +73,8 @@ jobs:
           cd linux
           cp -av "${GITHUB_WORKSPACE}/overlay/patch/kernel/rockchip64-current/dt/." \
             arch/arm64/boot/dts/rockchip/
+          # overlay 里的 dts 是 CRLF，和 Armbian build 里一样统一下 LF，免得 dtc 挑刺
+          sed -i 's/\r$//' arch/arm64/boot/dts/rockchip/*.dts arch/arm64/boot/dts/rockchip/*.dtsi
           ls -l arch/arm64/boot/dts/rockchip/
 
       # dtc 也要一份 .config（Makefile:835 的 include/config/auto.conf 依赖它），
@@ -85,12 +87,39 @@ jobs:
           echo "CONFIG_DRM_PANEL_IORCA_TL060FVXS07=m" >> .config
           make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           grep -n "CONFIG_DRM_PANEL_IORCA_TL060FVXS07" .config
+          # rockchip/Makefile 里的 dtb 列表挂在 CONFIG_ARCH_ROCKCHIP 下，defconfig
+          # 必须把它开成 y，否则 dtb-$(CONFIG_ARCH_ROCKCHIP) 为空、一个 dtb 都不编
+          grep -q "^CONFIG_ARCH_ROCKCHIP=y$" .config
+
+      # make dtbs 只编 rockchip/Makefile 里列出的 dtb。Armbian 的
+      # patching.py::auto_patch_all_dt_makefiles() 会自动把 overlay dt 目录里的
+      # dts 追加进这个列表；verify 不走 Armbian 框架，这里手动补一行。
+      - name: Register DTS in dt Makefile
+        run: |
+          set -eux
+          cd linux
+          DT_MAKEFILE=arch/arm64/boot/dts/rockchip/Makefile
+          grep -q "rk3399-forlinx-ok3399.dtb" "$DT_MAKEFILE" \
+            || echo 'dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3399-forlinx-ok3399.dtb' >> "$DT_MAKEFILE"
+          grep -n "rk3399-forlinx-ok3399.dtb" "$DT_MAKEFILE"
 
       - name: Build DTB
         run: |
           set -eux
           cd linux
           make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- dtbs
+          DTB=arch/arm64/boot/dts/rockchip/rk3399-forlinx-ok3399.dtb
+          if [ ! -f "$DTB" ]; then
+            echo "make dtbs did not emit $DTB -> compile it with dtc directly"
+            make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts/dtc/dtc
+            ./scripts/dtc/dtc -q -H 107 -I dts -O dtb \
+              -i arch/arm64/boot/dts \
+              -i arch/arm64/boot/dts/rockchip \
+              -i arch/arm64/boot/dts/include \
+              -i scripts/dtc/include-prefixes \
+              -o "$DTB" arch/arm64/boot/dts/rockchip/rk3399-forlinx-ok3399.dts
+          fi
+          ls -l "$DTB"
 
       - name: Verify DTB content
         run: |
