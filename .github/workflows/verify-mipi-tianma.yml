@@ -65,11 +65,13 @@ jobs:
           grep -q "DRM_PANEL_IORCA_TL060FVXS07" drivers/gpu/drm/panel/Makefile
           grep -q "DRM_PANEL_IORCA_TL060FVXS07" drivers/gpu/drm/panel/Kconfig
 
+      # 与 patching.py 的 dts-directories 行为一致：dt/ 下所有文件（dts + dtsi）
+      # 直接铺到 arch/arm64/boot/dts/rockchip/
       - name: Inject DTS
         run: |
           set -eux
           cd linux
-          cp -v "${GITHUB_WORKSPACE}/overlay/patch/kernel/rockchip64-current/dt/." \
+          cp -av "${GITHUB_WORKSPACE}/overlay/patch/kernel/rockchip64-current/dt/." \
             arch/arm64/boot/dts/rockchip/
           ls -l arch/arm64/boot/dts/rockchip/
 
