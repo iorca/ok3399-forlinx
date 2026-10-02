@@ -129,9 +129,10 @@ jobs:
           DTB=$(find /tmp/i -name 'rk3399-forlinx-ok3399.dtb' -print -quit)
           test -n "${DTB}" || { echo "::error::no rk3399-forlinx-ok3399.dtb inside image"; exit 1; }
           echo "DTB=$DTB"
-          fdtget "${DTB}" / panel@0 compatible   # 期望 iorca,tl060fvxs07
-          fdtget "${DTB}" / panel@0 reset-gpios  # 期望 bank 4 pin 0x1d
-          fdtget "${DTB}" / dsi-backlight pwms   # 期望 0xff420000 (PWM0)
+          # 节点路径含 "/" 和 "@"，整段加引号，否则 fdtget 参数数是奇数直接报错退出
+          test "$(fdtget "${DTB}" "/panel@0" compatible)" = "iorca,tl060fvxs07"
+          fdtget "${DTB}" "/panel@0" reset-gpios  # 期望 bank 4 pin 0x1d
+          fdtget "${DTB}" "/dsi-backlight" pwms   # 期望 0xff420000 (PWM0)
           KO=$(find /tmp/i -name 'panel-iorca-tl060fvxs07.ko' -print -quit)
           test -n "${KO}" || { echo "::error::panel module missing in image"; exit 1; }
           echo "KO=$KO"

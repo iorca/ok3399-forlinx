@@ -145,7 +145,9 @@ index 0000000..61837b9
 +	struct tl060 *ctx = panel_to_tl060(panel);
 +	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
 +
-+	/* reset-gpios is ACTIVE_LOW: 1 = line low (asserted) */
++	/* reset-gpios = <... GPIO_ACTIVE_LOW>: gpiod 值 1 -> 线拉低(assert)，0 -> 线拉高(deassert)。
++	 * 规格书要求复位低电平 >= 120ms，所以：先 deassert 10ms，assert 120ms，
++	 * 再 deassert 120ms，之后才发初始化序列。 */
 +	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
 +	usleep_range(10000, 11000);
 +	gpiod_set_value_cansleep(ctx->reset_gpio, 1);

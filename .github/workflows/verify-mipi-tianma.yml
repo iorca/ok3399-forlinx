@@ -127,12 +127,14 @@ jobs:
           cd linux
           DTB=arch/arm64/boot/dts/rockchip/rk3399-forlinx-ok3399.dtb
           test -f "$DTB"
-          fdtget "$DTB" / panel@0 compatible
-          fdtget "$DTB" / panel@0 reset-gpios
+          # 注意：节点路径含 "/" 和 "@"，必须整段加引号，否则 fdtget 参数数是奇数直接报错退出
+          test "$(fdtget "$DTB" "/panel@0" compatible)" = "iorca,tl060fvxs07"
+          fdtget "$DTB" "/panel@0" reset-gpios
           # RK_PD5 = bank 4, pin 29 -> 0x0000001d
-          fdtget "$DTB" / panel@0 reset-gpios | grep -q "0x0000001d"
-          fdtget "$DTB" / dsi-backlight pwms | grep -q "0xff420000" # PWM0
-          fdtget "$DTB" / panel@0 backlight
+          fdtget "$DTB" "/panel@0" reset-gpios | grep -q "0x0000001d"
+          fdtget "$DTB" "/dsi-backlight" pwms | grep -q "0xff420000" # PWM0
+          fdtget "$DTB" "/panel@0" backlight
+          echo "DTB payload verified"
 
       - name: Build panel module
         run: |
