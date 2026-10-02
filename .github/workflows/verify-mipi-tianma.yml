@@ -75,6 +75,17 @@ jobs:
             arch/arm64/boot/dts/rockchip/
           ls -l arch/arm64/boot/dts/rockchip/
 
+      # dtc 也要一份 .config（Makefile:835 的 include/config/auto.conf 依赖它），
+      # 用 arm64 defconfig 起手，随后把 panel 模块选项打开。
+      - name: Prepare .config
+        run: |
+          set -eux
+          cd linux
+          make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          echo "CONFIG_DRM_PANEL_IORCA_TL060FVXS07=m" >> .config
+          make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          grep -n "CONFIG_DRM_PANEL_IORCA_TL060FVXS07" .config
+
       - name: Build DTB
         run: |
           set -eux
@@ -98,7 +109,6 @@ jobs:
         run: |
           set -eux
           cd linux
-          echo "CONFIG_DRM_PANEL_IORCA_TL060FVXS07=m" >> .config
           make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M=drivers/gpu/drm/panel modules
           test -f drivers/gpu/drm/panel/panel-iorca-tl060fvxs07.ko
